@@ -60,7 +60,7 @@ These call [junos-mcp-server](https://github.com/Juniper/junos-mcp-server) as an
 MCP client over stdio — they do not re-implement device connectivity.
 
 - `validate_slax_on_device(script, router, script_name?)` — writes the script to
-  `/var/tmp` and runs `/usr/libexec/ui/slaxproc --check` on the device.
+  `/var/tmp/junos-slax/check` and runs `/usr/libexec/ui/slaxproc --check` on the device.
 - `deploy_slax_script(script, router, script_type, script_name?, run?, op_args?, commit_comment?)`
   — validates, installs into the per-type scripts directory, commits the matching
   `set system scripts ... file` (or event-options) statement, and optionally runs
@@ -143,7 +143,7 @@ check_device_connectivity()
 
 ### 3. Validate a SLAX script with slaxproc --check
 
-`validate_slax_on_device` writes the script to `/var/tmp` on the device and runs
+`validate_slax_on_device` writes the script to `/var/tmp/junos-slax/check` on the device and runs
 `/usr/libexec/ui/slaxproc --check`. `slaxproc --check` is silent on success, so
 `valid` is `true` when the output has no error text.
 
@@ -154,7 +154,7 @@ validate_slax_on_device(script="<SLAX text>", router="lab1", script_name="set-ar
 ```json
 {
   "router": "lab1",
-  "remote_path": "/var/tmp/set-arp-q-maxlen.slax",
+  "remote_path": "/var/tmp/junos-slax/check/set-arp-q-maxlen.slax",
   "write_output": "",
   "slaxproc_output": "",
   "valid": true
@@ -186,7 +186,7 @@ deploy_slax_script(
   "router": "lab1",
   "script_type": "op",
   "deployed": true,
-  "validation": { "valid": true, "remote_path": "/var/tmp/show-arp-qlen.slax" },
+  "validation": { "valid": true, "remote_path": "/var/tmp/junos-slax/check/show-arp-qlen.slax" },
   "remote_path": "/var/db/scripts/op/show-arp-qlen.slax",
   "config": "set system scripts op file show-arp-qlen.slax",
   "install_output": "",
