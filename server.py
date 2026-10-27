@@ -28,6 +28,17 @@ store = DocStore()
 # Device-side SLAX validator shipped with Junos/EVO.
 SLAXPROC = "/usr/libexec/ui/slaxproc"
 
+# "start shell command" breaks on lines over ~1000 chars, so send base64 in chunks.
+B64_CHUNK = 512
+
+# Scripts import "../import/junos.xsl", so validate one level below a dir that has import/.
+VALIDATE_ROOT = "/var/tmp/junos-slax"
+VALIDATE_DIR = f"{VALIDATE_ROOT}/check"
+VALIDATE_SETUP = (
+    f'start shell command "mkdir -p {VALIDATE_DIR}; '
+    f'ln -sfn /var/db/scripts/import {VALIDATE_ROOT}/import"'
+)
+
 
 @mcp.tool()
 def list_documents() -> list[dict[str, object]]:
@@ -182,18 +193,24 @@ def _slax_filename(script_name: str) -> str:
     return name if name.endswith(".slax") else f"{name}.slax"
 
 
-def _write_remote_cmd(script: str, remote_path: str) -> str:
-    """Build a 'start shell command' that writes the script via base64 decode."""
+def _write_remote_cmds(script: str, remote_path: str) -> list[str]:
+    """Build 'start shell command's that write the script via chunked base64."""
     b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
-    # base64 payload is quote-safe (A-Za-z0-9+/=); -d works on EVO and FreeBSD.
-    shell = f"printf %s '{b64}' | base64 -d > {remote_path}"
-    return f'start shell command "{shell}"'
+    tmp = f"{remote_path}.b64"
+    chunks = [b64[i : i + B64_CHUNK] for i in range(0, len(b64), B64_CHUNK)] or [""]
+    cmds: list[str] = []
+    for i, chunk in enumerate(chunks):
+        redirect = ">" if i == 0 else ">>"
+        # FreeBSD base64 -d drops input lacking a trailing newline, hence '%s\n'.
+        cmds.append(f"start shell command \"printf '%s\\n' '{chunk}' {redirect} {tmp}\"")
+    cmds.append(f'start shell command "base64 -d < {tmp} > {remote_path}; rm -f {tmp}"')
+    return cmds
 
 
 def _slax_is_valid(output: str) -> bool:
-    """slaxproc --check is silent on success; any error text means failure."""
+    """slaxproc --check prints no error text on success (or "script check succeeds")."""
     low = output.lower()
-    return "error" not in low and "invalid" not in low
+    return not any(w in low for w in ("error", "invalid", "fail", "no such file"))
 
 
 @mcp.tool()
@@ -202,8 +219,8 @@ def validate_slax_on_device(
 ) -> dict[str, object]:
     """Validate a SLAX script on a Junos device using slaxproc --check.
 
-    Writes the script to /var/tmp on the device (via junos-mcp-server's
-    execute_junos_command tool) and runs
+    Writes the script under /var/tmp/junos-slax/check on the device (via
+    junos-mcp-server's execute_junos_command tool) and runs
     "/usr/libexec/ui/slaxproc --check <file>" to check syntax and content.
 
     Args:
@@ -214,18 +231,19 @@ def validate_slax_on_device(
     Returns the remote path, raw slaxproc output, and a "valid" flag.
     """
     fname = _slax_filename(script_name)
-    remote_path = f"/var/tmp/{fname}"
+    remote_path = f"{VALIDATE_DIR}/{fname}"
 
-    write_out = jmcp_client.run_command(router, _write_remote_cmd(script, remote_path))
-    check_out = jmcp_client.run_command(
-        router, f'start shell command "{SLAXPROC} --check {remote_path}"'
-    )
+    cmds = [VALIDATE_SETUP, *_write_remote_cmds(script, remote_path)]
+    cmds.append(f'start shell command "{SLAXPROC} --check {remote_path}"')
+    outputs = jmcp_client.run_commands(router, cmds)
+    write_out = "\n".join(o for o in outputs[:-1] if o)
+    check_out = outputs[-1]
     return {
         "router": router,
         "remote_path": remote_path,
         "write_output": write_out,
         "slaxproc_output": check_out,
-        "valid": _slax_is_valid(check_out),
+        "valid": not write_out and _slax_is_valid(check_out),
     }
 
 
@@ -279,10 +297,20 @@ def deploy_slax_script(
     remote_dir, config_line = deploy_target(stype, fname)
     remote_path = f"{remote_dir}/{fname}"
 
-    install_out = jmcp_client.run_command(router, _write_remote_cmd(script, remote_path))
-    commit_out = jmcp_client.load_and_commit(
-        router, config_line, config_format="set", commit_comment=commit_comment
+    install_cmds = _write_remote_cmds(script, remote_path)
+    calls = [jmcp_client.command_call(router, c) for c in install_cmds]
+    calls.append(
+        jmcp_client.commit_call(
+            router, config_line, config_format="set", commit_comment=commit_comment
+        )
     )
+    run_cmd = f"op {fname[:-5]} {op_args}".strip()
+    if run and stype == "op":
+        calls.append(jmcp_client.command_call(router, run_cmd))
+    outputs = jmcp_client.call_tools(calls)
+    n = len(install_cmds)
+    install_out = "\n".join(o for o in outputs[:n] if o)
+    commit_out = outputs[n]
 
     report: dict[str, object] = {
         "router": router,
@@ -296,9 +324,8 @@ def deploy_slax_script(
     }
 
     if run and stype == "op":
-        run_cmd = f"op {_slax_filename(script_name)[:-5]} {op_args}".strip()
         report["run_command"] = run_cmd
-        report["run_output"] = jmcp_client.run_command(router, run_cmd)
+        report["run_output"] = outputs[n + 1]
 
     return report
 

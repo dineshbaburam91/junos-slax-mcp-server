@@ -53,16 +53,27 @@ def test_check_device_connectivity_ok(fake_device):
 def test_validate_valid_script(fake_device):
     res = server.validate_slax_on_device(scaffold_for("op"), "r1", "demo")
     assert res["router"] == "r1"
-    assert res["remote_path"] == "/var/tmp/demo.slax"
+    assert res["remote_path"] == "/var/tmp/junos-slax/check/demo.slax"
     assert res["valid"] is True
     # The script was actually written into the sandbox via the base64 flow.
-    assert (fake_device / "var/tmp/demo.slax").exists()
+    assert (fake_device / "var/tmp/junos-slax/check/demo.slax").exists()
 
 
 def test_validate_invalid_script(fake_device):
     res = server.validate_slax_on_device("this is not slax INVALID", "r1", "bad")
     assert res["valid"] is False
     assert "error" in res["slaxproc_output"].lower()
+
+
+def test_validate_long_script_is_written_in_chunks(fake_device):
+    script = scaffold_for("op") + "/* " + "x" * 3000 + " */\n"
+    cmds = server._write_remote_cmds(script, "/var/tmp/long.slax")
+    assert len(cmds) > 2
+    assert all(len(c) < 1000 for c in cmds)
+    res = server.validate_slax_on_device(script, "r1", "long")
+    assert res["valid"] is True
+    assert (fake_device / "var/tmp/junos-slax/check/long.slax").read_text() == script
+    assert not (fake_device / "var/tmp/junos-slax/check/long.slax.b64").exists()
 
 
 def test_deploy_op_script_installs_commits_and_runs(fake_device):

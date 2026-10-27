@@ -12,6 +12,7 @@ import asyncio
 import os
 import shutil
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -73,7 +74,22 @@ def _server_params() -> StdioServerParameters:
             )
         command = sys.executable
         args = [os.path.join(module_dir, "jmcp.py"), *stdio_args]
-    return StdioServerParameters(command=command, args=args, env=dict(os.environ))
+    # jmcp loads block.cmd/block.cfg from its cwd first, so keep them next to the inventory.
+    cwd = os.path.dirname(devices) if os.path.isabs(devices) else None
+    return StdioServerParameters(
+        command=command, args=args, env=dict(os.environ), cwd=cwd
+    )
+
+
+def _run(coro):
+    """Run a coroutine to completion, even if an event loop is already running."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    # FastMCP invokes sync tools on its loop thread, so use a fresh loop elsewhere.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
 
 
 def _result_text(result) -> str:
@@ -86,21 +102,29 @@ def _result_text(result) -> str:
     return "\n".join(parts).strip()
 
 
-async def _call_tool_async(name: str, arguments: dict) -> str:
+async def _call_tools_async(calls: list[tuple[str, dict]]) -> list[str]:
     params = _server_params()
+    outputs: list[str] = []
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            result = await session.call_tool(name, arguments)
-            text = _result_text(result)
-            if getattr(result, "isError", False):
-                return f"ERROR: {text}"
-            return text
+            for name, arguments in calls:
+                result = await session.call_tool(name, arguments)
+                text = _result_text(result)
+                if getattr(result, "isError", False):
+                    text = f"ERROR: {text}"
+                outputs.append(text)
+    return outputs
+
+
+def call_tools(calls: list[tuple[str, dict]]) -> list[str]:
+    """Call several jmcp tools over one session, so the device sees one SSH login."""
+    return _run(_call_tools_async(calls))
 
 
 def call_tool(name: str, arguments: dict) -> str:
     """Synchronously call a jmcp tool and return its text output."""
-    return asyncio.run(_call_tool_async(name, arguments))
+    return call_tools([(name, arguments)])[0]
 
 
 async def _list_tools_async() -> list[str]:
@@ -114,18 +138,44 @@ async def _list_tools_async() -> list[str]:
 
 def list_tools() -> list[str]:
     """Return the tool names advertised by jmcp (connectivity check)."""
-    return asyncio.run(_list_tools_async())
+    return _run(_list_tools_async())
 
 
 # --- convenience wrappers over specific jmcp tools -----------------------------
 
 
-def run_command(router: str, command: str, timeout: int = 360) -> str:
-    """Run a Junos operational command on a device via jmcp."""
-    return call_tool(
+def command_call(router: str, command: str, timeout: int = 360) -> tuple[str, dict]:
+    return (
         "execute_junos_command",
         {"router_name": router, "command": command, "timeout": timeout},
     )
+
+
+def commit_call(
+    router: str,
+    config_text: str,
+    config_format: str = "set",
+    commit_comment: str = "SLAX script deploy via junos-slax-mcp",
+) -> tuple[str, dict]:
+    return (
+        "load_and_commit_config",
+        {
+            "router_name": router,
+            "config_text": config_text,
+            "config_format": config_format,
+            "commit_comment": commit_comment,
+        },
+    )
+
+
+def run_command(router: str, command: str, timeout: int = 360) -> str:
+    """Run a Junos operational command on a device via jmcp."""
+    return call_tool(*command_call(router, command, timeout))
+
+
+def run_commands(router: str, commands: list[str], timeout: int = 360) -> list[str]:
+    """Run several operational commands on a device over one jmcp session."""
+    return call_tools([command_call(router, c, timeout) for c in commands])
 
 
 def load_and_commit(
@@ -135,12 +185,4 @@ def load_and_commit(
     commit_comment: str = "SLAX script deploy via junos-slax-mcp",
 ) -> str:
     """Load and commit configuration on a device via jmcp."""
-    return call_tool(
-        "load_and_commit_config",
-        {
-            "router_name": router,
-            "config_text": config_text,
-            "config_format": config_format,
-            "commit_comment": commit_comment,
-        },
-    )
+    return call_tool(*commit_call(router, config_text, config_format, commit_comment))

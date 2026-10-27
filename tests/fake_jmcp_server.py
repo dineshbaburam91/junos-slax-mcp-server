@@ -19,7 +19,8 @@ mcp = FastMCP("fake-jmcp")
 
 SANDBOX = Path(os.environ.get("FAKE_JMCP_SANDBOX", "/tmp/fake-jmcp"))
 
-_WRITE_RE = re.compile(r"printf %s '([^']*)' \| base64 -d > (\S+)")
+_CHUNK_RE = re.compile(r"printf '%s\\n' '([^']*)' (>>?) (\S+)")
+_DECODE_RE = re.compile(r"base64 -d < (\S+) > (\S+); rm -f (\S+)")
 _CHECK_RE = re.compile(r"slaxproc --check (\S+)")
 
 
@@ -40,12 +41,26 @@ def execute_junos_command(router_name: str, command: str, timeout: int = 360) ->
     if command.startswith("start shell command"):
         inner = _inner_shell(command)
 
-        write = _WRITE_RE.search(inner)
-        if write:
-            b64, path = write.group(1), write.group(2)
+        if inner.startswith("mkdir -p "):
+            return ""
+
+        chunk = _CHUNK_RE.search(inner)
+        if chunk:
+            data, redirect, path = chunk.groups()
             local = _local(path)
             local.parent.mkdir(parents=True, exist_ok=True)
-            local.write_bytes(base64.b64decode(b64))
+            with local.open("a" if redirect == ">>" else "w") as f:
+                f.write(data + "\n")
+            return ""
+
+        decode = _DECODE_RE.search(inner)
+        if decode:
+            src, dest, _ = decode.groups()
+            local_src = _local(src)
+            if not local_src.exists():
+                return f"{src}: No such file or directory"
+            _local(dest).write_bytes(base64.b64decode(local_src.read_text()))
+            local_src.unlink()
             return ""
 
         check = _CHECK_RE.search(inner)
