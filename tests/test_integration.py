@@ -11,11 +11,14 @@ Two groups:
 
 from __future__ import annotations
 
+import io
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
 
+import docs
 import jmcp_client
 import server
 from templates import SCRIPT_TYPES, scaffold_for
@@ -114,6 +117,29 @@ def test_deploy_rejects_unknown_script_type(fake_device):
 # --------------------------------------------------------------------------
 # Reference-pipeline integration (network)
 # --------------------------------------------------------------------------
+
+
+def test_junoscriptorium_indexes_only_slax_files(monkeypatch):
+    archive_data = io.BytesIO()
+    with tarfile.open(fileobj=archive_data, mode="w:gz") as archive:
+        for path, content in (
+            ("repo/library/event/interface.slax", b"version 1.0;\nmatch / {}"),
+            ("repo/README.md", b"not a script"),
+        ):
+            member = tarfile.TarInfo(path)
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+        link = tarfile.TarInfo("repo/library/event/link.slax")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "interface.slax"
+        archive.addfile(link)
+
+    monkeypatch.setattr(docs.DocStore, "_fetch", lambda self, url: archive_data.getvalue())
+    store = docs.DocStore()
+    doc = store.get("junoscriptorium")
+    assert doc.error is None
+    assert [page.label for page in doc.pages] == ["library/event/interface.slax"]
+    assert store.search("interface", doc_id="junoscriptorium")[0]["section"] == doc.pages[0].label
 
 
 @pytest.fixture(scope="module")
