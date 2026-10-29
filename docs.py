@@ -1,7 +1,7 @@
 """Download, cache, and search the Junos XML RPC and SLAX reference sources.
 
 Sources can be PDFs (the Juniper Day One books), a single HTML manual
-(the libslax SLAX language manual), or a GitHub wiki (the libslax wiki).
+(the libslax SLAX language manual), a GitHub wiki, or a SLAX script archive.
 Each source is fetched once into a local cache, its text is extracted into
 labelled sections ("pages"), and a lightweight keyword scorer surfaces the
 most relevant passages for a question or script-generation request.
@@ -14,6 +14,7 @@ import io
 import os
 import re
 import ssl
+import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -58,6 +59,18 @@ DOCUMENTS: dict[str, dict[str, str]] = {
         "title": "libslax Wiki",
         "url": "https://github.com/Juniper/libslax/wiki",
         "topic": "libslax build, usage, tooling, and SLAX examples",
+    },
+    "slax-1-1": {
+        "kind": "wiki",
+        "title": "What's New in SLAX 1.1",
+        "url": "https://github.com/Juniper/libslax/wiki/NewIn1-1",
+        "topic": "SLAX 1.1 language features and syntax changes",
+    },
+    "junoscriptorium": {
+        "kind": "slax-archive",
+        "title": "Junoscriptorium SLAX Examples",
+        "url": "https://github.com/Juniper/junoscriptorium/archive/refs/heads/master.tar.gz",
+        "topic": "Community SLAX op, commit, and event script examples",
     },
 }
 
@@ -160,6 +173,28 @@ class DocStore:
                 )
             )
 
+    def _extract_slax_archive(self, doc: Document) -> None:
+        data = self._fetch(doc.url)
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            for member in archive:
+                if not member.isfile() or not member.name.endswith(".slax"):
+                    continue
+                source = archive.extractfile(member)
+                if source is None:
+                    continue
+                path = member.name.partition("/")[2]
+                text = source.read().decode("utf-8", errors="replace")
+                for label, chunk in _chunk_text(text, path):
+                    doc.pages.append(
+                        Page(
+                            doc_id=doc.doc_id,
+                            number=len(doc.pages) + 1,
+                            text=chunk,
+                            label=label,
+                            tokens=set(_tokenize(path + " " + chunk)),
+                        )
+                    )
+
     def _extract_wiki(self, doc: Document) -> None:
         home_html = self._fetch(doc.url).decode("utf-8", errors="replace")
         page_urls = _wiki_page_links(doc.url, home_html)
@@ -202,6 +237,8 @@ class DocStore:
                 self._extract_html(doc)
             elif meta["kind"] == "wiki":
                 self._extract_wiki(doc)
+            elif meta["kind"] == "slax-archive":
+                self._extract_slax_archive(doc)
             else:  # pragma: no cover - guarded by catalog
                 raise ValueError(f"Unknown source kind '{meta['kind']}'")
         except Exception as exc:  # noqa: BLE001 - keep server up if one source fails
