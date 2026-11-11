@@ -2,7 +2,8 @@
 
 Sources can be PDFs (the Juniper Day One books), a single HTML manual
 (the libslax SLAX language manual), a GitHub wiki, or a SLAX script archive.
-Each source is fetched once into a local cache, its text is extracted into
+Each source is fetched once into a local cache (or read from the repo when its
+"url" is a relative path), its text is extracted into
 labelled sections ("pages"), and a lightweight keyword scorer surfaces the
 most relevant passages for a question or script-generation request.
 """
@@ -72,7 +73,16 @@ DOCUMENTS: dict[str, dict[str, str]] = {
         "url": "https://github.com/Juniper/junoscriptorium/archive/refs/heads/master.tar.gz",
         "topic": "Community SLAX op, commit, and event script examples",
     },
+    "translation-scripts": {
+        "kind": "pdf",
+        "title": "Translation Scripts",
+        "url": "docs/TranslationScripts.pdf",
+        "topic": "SLAX translation scripts mapping YANG/foreign-schema config to native Junos config",
+    },
 }
+
+# Sources whose "url" has no scheme are read from this repo directory.
+BASE_DIR = Path(__file__).resolve().parent
 
 # Cache directory can be overridden so the server works in read-only installs.
 CACHE_DIR = Path(
@@ -124,6 +134,8 @@ class DocStore:
     # --- fetching / caching -------------------------------------------------
 
     def _fetch(self, url: str) -> bytes:
+        if not urlparse(url).scheme:
+            return (BASE_DIR / url).read_bytes()
         key = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
         dest = CACHE_DIR / key
         if dest.exists() and dest.stat().st_size > 0:
