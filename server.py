@@ -75,7 +75,8 @@ def search_docs(
         query: The question or keywords, e.g. "get-interface-information RPC"
             or "SLAX for-each loop syntax".
         doc_id: Optional source id to restrict the search ("xml-hierarchy",
-            "automation-reference", "slax-manual", or "libslax-wiki"). Omit to
+            "automation-reference", "slax-manual", "libslax-wiki", "slax-1-1",
+            "junoscriptorium", or "translation-scripts"). Omit to
             search all sources.
         max_results: Maximum number of matching passages to return.
 
