@@ -75,13 +75,14 @@ The assistant calls these for you; you rarely invoke them directly.
 - `read_pages(doc_id, start_page, end_page?)` — raw text of specific sections.
 - `list_documents()` — list sources, section counts, and any load errors.
 
-The server creates `~/Documents/junos-slax-generated/` on the first save.
+The server creates `~/junos-slax-generated/` on the first save.
 Scaffolds and completed scripts from all server sessions are stored there with
 unique names, so saves do not overwrite earlier files. They remain until you
 delete them; this scratch directory is not automatically cleaned up or
 indexed as samples. On POSIX systems, newly created directories and files are
-restricted to the current user. Previously saved files in the system temporary
-directory are not moved. The saved scaffold is not the final assistant-adapted
+restricted to the current user. Previously saved files in
+`~/Documents/junos-slax-generated/` or the system temporary directory are not
+moved. The saved scaffold is not the final assistant-adapted
 script; saving the latter requires `save_slax_script`.
 
 ### Device tools (via junos-mcp-server)

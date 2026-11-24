@@ -210,7 +210,7 @@ def test_generated_scaffolds_are_saved_without_overwriting(monkeypatch, tmp_path
             return []
 
     monkeypatch.setattr(server, "store", EmptyStore())
-    generated_dir = tmp_path / "Documents" / "junos-slax-generated"
+    generated_dir = tmp_path / "junos-slax-generated"
     monkeypatch.setattr(server, "GENERATED_DIR", generated_dir)
 
     first = server.generate_slax_script("show interfaces", "op")
@@ -264,7 +264,7 @@ def test_default_save_directory_is_shared_across_server_processes(monkeypatch, t
         for _ in range(2)
     ]
 
-    assert paths[0].parent == tmp_path / "Documents" / "junos-slax-generated"
+    assert paths[0].parent == tmp_path / "junos-slax-generated"
     assert paths[1].parent == paths[0].parent
     assert paths[0] != paths[1]
     assert all(path.read_text(encoding="utf-8") == "version 1.1;" for path in paths)

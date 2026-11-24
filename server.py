@@ -29,7 +29,7 @@ mcp = FastMCP("junos-slax")
 store = DocStore()
 
 # Stable scratch directory shared across server restarts.
-GENERATED_DIR = Path.home() / "Documents" / "junos-slax-generated"
+GENERATED_DIR = Path.home() / "junos-slax-generated"
 
 # Device-side SLAX validator shipped with Junos/EVO.
 SLAXPROC = "/usr/libexec/ui/slaxproc"
@@ -155,7 +155,7 @@ def save_slax_script(script: str, script_name: str = "generated") -> dict[str, s
             letter or digit.
 
     Returns the absolute path of a uniquely named file under
-    ~/Documents/junos-slax-generated. Files are retained until removed.
+    ~/junos-slax-generated. Files are retained until removed.
     """
     if not script.strip():
         raise ValueError("script must not be empty")
