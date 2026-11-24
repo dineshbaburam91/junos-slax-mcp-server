@@ -1,0 +1,97 @@
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+ns xr = "http://cisco.com/ns/yang/Cisco-IOS-XR-ipv4-bgp-cfg";
+
+import "../import/junos.xsl";
+
+match configuration {
+    var $instances = xr:bgp/xr:instance[xr:instance-name == "default"];
+    var $instance-as = $instances/xr:instance-as;
+    var $bgp = $instance-as/xr:four-byte-as;
+    var $global = $bgp/xr:default-vrf/xr:global;
+    var $global-af = $global/xr:global-afs/xr:global-af[
+        xr:af-name == "ipv4-unicast"
+    ];
+    var $networks = $global-af/xr:sourced-networks/xr:sourced-network;
+    var $neighbors = $bgp/xr:default-vrf/xr:bgp-entity/
+        xr:neighbors/xr:neighbor;
+    var $neighbor-af = $neighbors/xr:neighbor-afs/xr:neighbor-af[
+        xr:af-name == "ipv4-unicast"
+    ];
+
+    if (xr:bgp) {
+        if (count($instances) != 1 or count($instance-as) != 1 or
+            count($bgp) != 1 or count($neighbors) != 1 or
+            count($global-af) != 1 or count($neighbor-af) != 1 or
+            not($bgp/xr:bgp-running) or not($global/xr:router-id) or
+            not($global-af/xr:enable) or not($neighbor-af/xr:activate) or
+            not($networks) or not($neighbors/xr:remote-as/xr:as-xx) or
+            not($neighbors/xr:remote-as/xr:as-yy)) {
+            <xnm:error> {
+                <message> "Expected one complete default BGP instance, IPv4 AF and neighbor";
+            }
+        } else {
+            var $local-as = number($instance-as/xr:as) * 65536
+                + number($bgp/xr:as);
+            var $peer-as = number($neighbors/xr:remote-as/xr:as-xx) * 65536
+                + number($neighbors/xr:remote-as/xr:as-yy);
+
+            <transient-change> {
+                <routing-options> {
+                    <router-id> $global/xr:router-id;
+                    <autonomous-system> {
+                        <as-number> $local-as;
+                    }
+                }
+                <policy-options> {
+                    <policy-statement> {
+                        <name> "XR-BGP-EXPORT";
+                        <term> {
+                            <name> "sourced-networks";
+                            <from> {
+                                for-each ($networks) {
+                                    <route-filter> {
+                                        <address> xr:network-addr _ "/" _ xr:network-prefix;
+                                        <exact>;
+                                    }
+                                }
+                            }
+                            <then> {
+                                if ($neighbor-af/xr:next-hop-self == "true") {
+                                    <next-hop> {
+                                        <self>;
+                                    }
+                                }
+                                <accept>;
+                            }
+                        }
+                        <then> {
+                            <reject>;
+                        }
+                    }
+                }
+                <protocols> {
+                    <bgp> {
+                        <group> {
+                            <name> "XR-BGP";
+                            <type> "external";
+                            <family> {
+                                <inet> {
+                                    <unicast>;
+                                }
+                            }
+                            <export> "XR-BGP-EXPORT";
+                            <neighbor> {
+                                <name> $neighbors/xr:neighbor-address;
+                                <peer-as> $peer-as;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
