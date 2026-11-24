@@ -9,6 +9,9 @@ scenario grounded in those sources.
 from __future__ import annotations
 
 import base64
+import re
+import tempfile
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
@@ -24,6 +27,9 @@ from templates import (
 
 mcp = FastMCP("junos-slax")
 store = DocStore()
+
+# Stable scratch directory shared across server restarts.
+GENERATED_DIR = Path.home() / "Documents" / "junos-slax-generated"
 
 # Device-side SLAX validator shipped with Junos/EVO.
 SLAXPROC = "/usr/libexec/ui/slaxproc"
@@ -44,9 +50,9 @@ VALIDATE_SETUP = (
 def list_documents() -> list[dict[str, object]]:
     """List the reference sources this server can answer questions from.
 
-    Returns each source's id, title, kind (pdf/html/wiki), topic, source URL,
-    and the number of extracted sections. Use the returned doc_id to scope
-    other tools. If a source failed to download, its "error" field is set.
+    Returns each source's id, title, kind, topic, source URL, and the number
+    of extracted sections. Use the returned doc_id to scope other tools.
+    If a source failed to load, its "error" field is set.
     """
     results: list[dict[str, object]] = []
     for doc_id, meta in DOCUMENTS.items():
@@ -74,9 +80,8 @@ def search_docs(
     Args:
         query: The question or keywords, e.g. "get-interface-information RPC"
             or "SLAX for-each loop syntax".
-        doc_id: Optional source id to restrict the search ("xml-hierarchy",
-            "automation-reference", "slax-manual", or "libslax-wiki"). Omit to
-            search all sources.
+        doc_id: Optional source id to restrict the search. Omit to search all
+            sources, including local docs and SLAX samples.
         max_results: Maximum number of matching passages to return.
 
     Returns a ranked list of snippets with their document, section label, and
@@ -140,6 +145,39 @@ def answer_context(question: str, max_results: int = 8) -> dict[str, object]:
 
 
 @mcp.tool()
+def save_slax_script(script: str, script_name: str = "generated") -> dict[str, str]:
+    """Save a completed SLAX script locally for later reference.
+
+    Args:
+        script: The complete SLAX script text to save.
+        script_name: Filename prefix, with an optional .slax extension. Use
+            letters, digits, underscores, and hyphens; names start with a
+            letter or digit.
+
+    Returns the absolute path of a uniquely named file under
+    ~/Documents/junos-slax-generated. Files are retained until removed.
+    """
+    if not script.strip():
+        raise ValueError("script must not be empty")
+    name = script_name.removesuffix(".slax")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", name):
+        raise ValueError("script_name must be a simple filename of up to 80 characters")
+
+    GENERATED_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", prefix=f"{name}-", suffix=".slax",
+        dir=GENERATED_DIR, delete=False
+    ) as file:
+        try:
+            file.write(script)
+            file.flush()
+        except (OSError, UnicodeError):
+            Path(file.name).unlink(missing_ok=True)
+            raise
+    return {"path": file.name}
+
+
+@mcp.tool()
 def generate_slax_script(
     scenario: str, script_type: str | None = None, max_references: int = 6
 ) -> dict[str, object]:
@@ -149,16 +187,18 @@ def generate_slax_script(
     commit if any interface has no description" or "op script to show BGP
     neighbors in a given VRF"), it returns a ready-to-complete SLAX scaffold
     with the correct boilerplate for the inferred (or requested) script type,
-    plus grounding passages from the SLAX manual and automation reference.
+    plus grounding passages from the references, including local SLAX samples.
 
     Args:
         scenario: What the SLAX script should do.
-        script_type: Optional explicit type: "op", "commit", "event", or
-            "snmp". If omitted, the type is inferred from the scenario.
+        script_type: Optional explicit type: "op", "commit", "event", "snmp",
+            or "translation". If omitted, the type is inferred from the
+            scenario.
         max_references: How many supporting reference passages to include.
 
-    Returns the chosen script_type, a SLAX scaffold, install instructions,
-    grounding passages (with citations), and guidance for completing the body.
+    Saves the scaffold locally and returns its path, the chosen script_type,
+    install instructions, grounding passages, and guidance for completing it.
+    Use save_slax_script to save the completed script separately.
     """
     chosen = (script_type or "").strip().lower()
     if chosen not in SCRIPT_TYPES:
@@ -166,15 +206,17 @@ def generate_slax_script(
 
     scaffold = scaffold_for(chosen)
 
-    # Pull scenario-relevant syntax from the SLAX manual and automation book.
+    # Pull scenario-relevant passages from all indexed sources.
     passages = store.search(
         f"{chosen} script {scenario}", doc_id=None, max_results=max_references
     )
+    saved_scaffold = save_slax_script(scaffold, f"{chosen}-scaffold")
 
     return {
         "scenario": scenario,
         "script_type": chosen,
         "scaffold": scaffold,
+        "scaffold_path": saved_scaffold["path"],
         "install": INSTALL_NOTES.get(chosen, ""),
         "references": passages,
         "guidance": (
@@ -183,7 +225,9 @@ def generate_slax_script(
             "junos.xsl import. Build RPCs as XML elements and invoke them with "
             "jcs:invoke(). Use the reference passages for exact element and "
             "statement syntax, and cite them if you explain the script. Only "
-            "use SLAX/Junos constructs supported by the references."
+            "use SLAX/Junos constructs supported by the references. Call "
+            "save_slax_script with the complete adapted script and provide "
+            "its returned path to the user."
         ),
     }
 
@@ -269,7 +313,7 @@ def deploy_slax_script(
     Args:
         script: The full SLAX script text.
         router: Device name from the junos-mcp-server devices.json.
-        script_type: "op", "commit", "event", or "snmp".
+        script_type: "op", "commit", "event", "snmp", or "translation".
         script_name: Base name for the file (".slax" appended).
         run: If True and script_type is "op", run the script after commit.
         op_args: Extra arguments passed when running an op script.

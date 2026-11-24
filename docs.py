@@ -1,7 +1,8 @@
 """Download, cache, and search the Junos XML RPC and SLAX reference sources.
 
 Sources can be PDFs (the Juniper Day One books), a single HTML manual
-(the libslax SLAX language manual), a GitHub wiki, or a SLAX script archive.
+(the libslax SLAX language manual), a GitHub wiki, a SLAX script archive,
+or local SLAX samples.
 Each source is fetched once into a local cache, its text is extracted into
 labelled sections ("pages"), and a lightweight keyword scorer surfaces the
 most relevant passages for a question or script-generation request.
@@ -33,6 +34,9 @@ def _ssl_context() -> ssl.SSLContext | bool:
     except Exception:  # noqa: BLE001 - fall back to httpx's default (certifi)
         return True
 
+
+LOCAL_DOCS_DIR = Path(__file__).resolve().parent / "docs"
+LOCAL_SAMPLES_DIR = Path(__file__).resolve().parent / "samples"
 
 # Catalog of the reference sources this server knows about.
 DOCUMENTS: dict[str, dict[str, str]] = {
@@ -73,6 +77,63 @@ DOCUMENTS: dict[str, dict[str, str]] = {
         "topic": "Community SLAX op, commit, and event script examples",
     },
 }
+
+
+def _local_doc_slug(relative: Path) -> str:
+    relative_stem = relative.with_suffix("").as_posix()
+    relative_stem = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", relative_stem)
+    return re.sub(r"[^a-z0-9]+", "-", relative_stem.lower()).strip("-")
+
+
+def _discover_local_pdfs(directory: Path = LOCAL_DOCS_DIR) -> dict[str, dict[str, str]]:
+    """Add PDFs found under the repository's docs directory to the catalog."""
+    local_docs: dict[str, dict[str, str]] = {}
+    if not directory.is_dir():
+        return local_docs
+
+    for path in sorted(directory.rglob("*.pdf")):
+        relative = path.relative_to(directory)
+        doc_id = f"local-{_local_doc_slug(relative)}"
+        if doc_id in DOCUMENTS or doc_id in local_docs:
+            raise ValueError(f"Duplicate local document id '{doc_id}'")
+        title_stem = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", relative.stem)
+        title = title_stem.replace("-", " ").replace("_", " ")
+        local_docs[doc_id] = {
+            "kind": "local-pdf",
+            "title": title,
+            "url": path.resolve().as_uri(),
+            "topic": f"Local documentation from {relative.as_posix()}",
+            "path": str(path),
+        }
+    return local_docs
+
+
+def _discover_local_samples(
+    directory: Path = LOCAL_SAMPLES_DIR,
+) -> dict[str, dict[str, str]]:
+    """Catalog local SLAX samples using their paths relative to samples/."""
+    samples: dict[str, dict[str, str]] = {}
+    if not directory.is_dir():
+        return samples
+
+    for path in sorted(directory.rglob("*.slax")):
+        relative = path.relative_to(directory)
+        doc_id = f"sample-{_local_doc_slug(relative)}"
+        if doc_id in DOCUMENTS or doc_id in samples:
+            raise ValueError(f"Duplicate local sample id '{doc_id}'")
+        samples[doc_id] = {
+            "kind": "local-slax",
+            "title": f"SLAX sample: {relative.as_posix()}",
+            "url": path.resolve().as_uri(),
+            "topic": f"Local SLAX example from {relative.as_posix()}",
+            "path": str(path),
+            "label": relative.as_posix(),
+        }
+    return samples
+
+
+DOCUMENTS.update(_discover_local_pdfs())
+DOCUMENTS.update(_discover_local_samples())
 
 # Cache directory can be overridden so the server works in read-only installs.
 CACHE_DIR = Path(
@@ -142,8 +203,9 @@ class DocStore:
 
     # --- extraction per source kind ----------------------------------------
 
-    def _extract_pdf(self, doc: Document) -> None:
-        data = self._fetch(doc.url)
+    def _extract_pdf(self, doc: Document, data: bytes | None = None) -> None:
+        if data is None:
+            data = self._fetch(doc.url)
         reader = PdfReader(io.BytesIO(data))
         for idx, page in enumerate(reader.pages, start=1):
             try:
@@ -184,16 +246,19 @@ class DocStore:
                     continue
                 path = member.name.partition("/")[2]
                 text = source.read().decode("utf-8", errors="replace")
-                for label, chunk in _chunk_text(text, path):
-                    doc.pages.append(
-                        Page(
-                            doc_id=doc.doc_id,
-                            number=len(doc.pages) + 1,
-                            text=chunk,
-                            label=label,
-                            tokens=set(_tokenize(path + " " + chunk)),
-                        )
-                    )
+                self._add_script_pages(doc, path, text)
+
+    def _add_script_pages(self, doc: Document, path: str, text: str) -> None:
+        for label, chunk in _chunk_text(text, path):
+            doc.pages.append(
+                Page(
+                    doc_id=doc.doc_id,
+                    number=len(doc.pages) + 1,
+                    text=chunk,
+                    label=label,
+                    tokens=set(_tokenize(path + " " + chunk)),
+                )
+            )
 
     def _extract_wiki(self, doc: Document) -> None:
         home_html = self._fetch(doc.url).decode("utf-8", errors="replace")
@@ -233,6 +298,11 @@ class DocStore:
         try:
             if meta["kind"] == "pdf":
                 self._extract_pdf(doc)
+            elif meta["kind"] == "local-pdf":
+                self._extract_pdf(doc, Path(meta["path"]).read_bytes())
+            elif meta["kind"] == "local-slax":
+                text = Path(meta["path"]).read_text(encoding="utf-8")
+                self._add_script_pages(doc, meta["label"], text)
             elif meta["kind"] == "html":
                 self._extract_html(doc)
             elif meta["kind"] == "wiki":

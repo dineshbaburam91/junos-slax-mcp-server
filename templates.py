@@ -18,7 +18,7 @@ ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
 import "../import/junos.xsl";
 """
 
-SCRIPT_TYPES = ("op", "commit", "event", "snmp")
+SCRIPT_TYPES = ("op", "commit", "event", "snmp", "translation")
 
 # Keyword hints used to infer the script type from a free-text scenario.
 _TYPE_HINTS: dict[str, tuple[str, ...]] = {
@@ -47,6 +47,14 @@ _TYPE_HINTS: dict[str, tuple[str, ...]] = {
         "mib",
         "get-next",
         "unsupported oid",
+    ),
+    "translation": (
+        "translation",
+        "translate",
+        "foreign schema",
+        "foreign-schema",
+        "openconfig",
+        "yang",
     ),
     "op": (
         "op script",
@@ -156,6 +164,28 @@ match / {
     }
 }
 """,
+    "translation": """version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+ns oc = "http://openconfig.net/yang/bgp";
+
+import "../import/junos.xsl";
+
+match configuration {
+    var $as = oc:bgp/oc:global/oc:config/oc:as;
+    if ($as) {
+        <transient-change> {
+            <routing-options> {
+                <autonomous-system> {
+                    <as-number> $as;
+                }
+            }
+        }
+    }
+}
+""",
 }
 
 # Short apply/install note per script type for the generated response.
@@ -168,6 +198,9 @@ INSTALL_NOTES: dict[str, str] = {
     "bind it from an [ event-options policy ... then event-script ].",
     "snmp": "Install as an op script and map the OID under "
     "[ system scripts op ] plus the SNMP MIB mapping.",
+    "translation": "Install under [ system scripts translation-scripts file "
+    "<name>.slax ]; it translates foreign-schema configuration into native "
+    "Junos configuration during commit processing.",
 }
 
 # On-device scripts directory per script type.
@@ -176,6 +209,7 @@ SCRIPT_DIRS: dict[str, str] = {
     "commit": "/var/db/scripts/commit",
     "event": "/var/db/scripts/event",
     "snmp": "/var/db/scripts/snmp",
+    "translation": "/var/db/scripts/translation",
 }
 
 
@@ -188,6 +222,8 @@ def deploy_target(script_type: str, filename: str) -> tuple[str, str]:
     remote_dir = SCRIPT_DIRS.get(script_type, SCRIPT_DIRS["op"])
     if script_type == "event":
         config_line = f"set event-options event-script file {filename}"
+    elif script_type == "translation":
+        config_line = f"set system scripts translation-scripts file {filename}"
     else:
         kind = script_type if script_type in ("op", "commit", "snmp") else "op"
         config_line = f"set system scripts {kind} file {filename}"
@@ -203,8 +239,12 @@ def infer_script_type(scenario: str) -> str:
         for hint in hints:
             if hint in low:
                 scores[kind] += 1
-    best = max(scores, key=lambda k: scores[k])
-    return best if scores[best] > 0 else "op"
+    best_score = max(scores.values())
+    if best_score == 0:
+        return "op"
+    if scores["translation"] == best_score:
+        return "translation"
+    return max(scores, key=lambda k: scores[k])
 
 
 def scaffold_for(script_type: str) -> str:

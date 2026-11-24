@@ -11,7 +11,9 @@ Two groups:
 
 from __future__ import annotations
 
+import asyncio
 import io
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
@@ -21,7 +23,7 @@ import pytest
 import docs
 import jmcp_client
 import server
-from templates import SCRIPT_TYPES, scaffold_for
+from templates import SCRIPT_TYPES, deploy_target, infer_script_type, scaffold_for
 
 FAKE_SERVER = Path(__file__).parent / "fake_jmcp_server.py"
 
@@ -140,6 +142,174 @@ def test_junoscriptorium_indexes_only_slax_files(monkeypatch):
     assert doc.error is None
     assert [page.label for page in doc.pages] == ["library/event/interface.slax"]
     assert store.search("interface", doc_id="junoscriptorium")[0]["section"] == doc.pages[0].label
+
+
+def test_local_docs_folder_pdfs_are_discovered(tmp_path):
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "translation-scripts.pdf").write_bytes(b"pdf placeholder")
+    (nested / "notes.md").write_text("not a PDF")
+
+    catalog = docs._discover_local_pdfs(tmp_path)
+
+    assert list(catalog) == ["local-nested-translation-scripts"]
+    assert catalog["local-nested-translation-scripts"]["kind"] == "local-pdf"
+    assert catalog["local-nested-translation-scripts"]["path"].endswith(
+        "nested/translation-scripts.pdf"
+    )
+
+
+def test_checked_in_docs_pdf_is_indexed_and_searchable():
+    store = docs.DocStore()
+    document = store.get("local-translation-scripts")
+
+    assert document.kind == "local-pdf"
+    assert document.page_count > 0
+    assert document.error is None
+    assert store.search("foreign schema translation", doc_id=document.doc_id)
+
+
+def test_local_samples_are_searchable_and_used_by_generator(monkeypatch, tmp_path):
+    samples = tmp_path / "samples"
+    (samples / "commit").mkdir(parents=True)
+    sample = samples / "commit" / "license-check.slax"
+    sample.write_text(
+        'version 1.0;\nmatch configuration { <output> "license_alarm_marker"; }\n',
+        encoding="utf-8",
+    )
+    (samples / "commit" / "notes.txt").write_text("not a SLAX sample")
+    (samples / "event").mkdir()
+    (samples / "event" / "license-check.slax").write_text(
+        'version 1.0;\nmatch / { <output> "event"; }\n', encoding="utf-8"
+    )
+
+    catalog = docs._discover_local_samples(samples)
+    monkeypatch.setattr(docs, "DOCUMENTS", catalog)
+    monkeypatch.setattr(server, "DOCUMENTS", catalog)
+    monkeypatch.setattr(server, "store", docs.DocStore())
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+
+    assert set(catalog) == {
+        "sample-commit-license-check",
+        "sample-event-license-check",
+    }
+    rows = server.list_documents()
+    commit = next(row for row in rows if row["doc_id"] == "sample-commit-license-check")
+    assert commit["error"] is None
+    assert commit["sections"] == 1
+    result = server.search_docs("license_alarm_marker", doc_id=commit["doc_id"])
+    assert result[0]["section"] == "commit/license-check.slax"
+    assert "license_alarm_marker" in server.read_pages(commit["doc_id"], 1)
+    generated = server.generate_slax_script("license_alarm_marker", "commit")
+    assert any(r["doc_id"] == commit["doc_id"] for r in generated["references"])
+
+
+def test_generated_scaffolds_are_saved_without_overwriting(monkeypatch, tmp_path):
+    class EmptyStore:
+        def search(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(server, "store", EmptyStore())
+    generated_dir = tmp_path / "Documents" / "junos-slax-generated"
+    monkeypatch.setattr(server, "GENERATED_DIR", generated_dir)
+
+    first = server.generate_slax_script("show interfaces", "op")
+    second = server.generate_slax_script("show interfaces", "op")
+    first_path = Path(first["scaffold_path"])
+    second_path = Path(second["scaffold_path"])
+
+    assert first_path.parent == generated_dir
+    assert first_path.suffix == ".slax"
+    assert first_path != second_path
+    assert first_path.read_text(encoding="utf-8") == first["scaffold"]
+    assert second_path.read_text(encoding="utf-8") == second["scaffold"]
+    assert "save_slax_script" in first["guidance"]
+
+
+def test_save_completed_script_and_reject_invalid_input(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    script = 'version 1.1;\nmatch / { <output> "up"; }\n'
+    saved = server.save_slax_script(script, "interface-status.slax")
+    path = Path(saved["path"])
+
+    assert path.parent == tmp_path
+    assert path.name.startswith("interface-status-")
+    assert path.read_text(encoding="utf-8") == script
+    for name in ("../escape", "/tmp/script", "invalid name"):
+        with pytest.raises(ValueError):
+            server.save_slax_script(script, name)
+    with pytest.raises(ValueError):
+        server.save_slax_script("  ")
+
+
+def test_save_script_reports_storage_errors(monkeypatch, tmp_path):
+    blocked = tmp_path / "not-a-directory"
+    blocked.write_text("existing file")
+    monkeypatch.setattr(server, "GENERATED_DIR", blocked / "generated")
+    with pytest.raises(NotADirectoryError):
+        server.save_slax_script("version 1.1;")
+
+
+def test_default_save_directory_is_shared_across_server_processes(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    code = (
+        'import server; '
+        'print(server.save_slax_script("version 1.1;", "example")["path"])'
+    )
+    paths = [
+        Path(subprocess.run(
+            [sys.executable, "-c", code], check=True, capture_output=True, text=True
+        ).stdout.strip())
+        for _ in range(2)
+    ]
+
+    assert paths[0].parent == tmp_path / "Documents" / "junos-slax-generated"
+    assert paths[1].parent == paths[0].parent
+    assert paths[0] != paths[1]
+    assert all(path.read_text(encoding="utf-8") == "version 1.1;" for path in paths)
+
+
+def test_save_script_is_available_through_mcp(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    _, result = asyncio.run(
+        server.mcp.call_tool(
+            "save_slax_script",
+            {"script": "version 1.1;\n", "script_name": "example"},
+        )
+    )
+    assert Path(result["path"]).read_text(encoding="utf-8") == "version 1.1;\n"
+
+
+def test_local_sample_load_errors_are_reported(monkeypatch, tmp_path):
+    sample = tmp_path / "invalid.slax"
+    sample.write_bytes(b"\xff")
+    catalog = docs._discover_local_samples(tmp_path)
+    monkeypatch.setattr(docs, "DOCUMENTS", catalog)
+
+    doc = docs.DocStore().get("sample-invalid")
+    assert doc.error and "UnicodeDecodeError" in doc.error
+
+
+def test_translation_script_type_has_scaffold_and_deploy_target():
+    assert "translation" in SCRIPT_TYPES
+    assert infer_script_type("translate OpenConfig BGP configuration") == "translation"
+    assert infer_script_type("translation script for configuration") == "translation"
+    assert "match configuration" in scaffold_for("translation")
+    assert deploy_target("translation", "bgp.slax") == (
+        "/var/db/scripts/translation",
+        "set system scripts translation-scripts file bgp.slax",
+    )
+
+
+def test_translation_script_deploys(fake_device):
+    rep = server.deploy_slax_script(
+        scaffold_for("translation"), "r1", "translation", "bgp"
+    )
+    assert rep["deployed"] is True
+    assert rep["remote_path"] == "/var/db/scripts/translation/bgp.slax"
+    assert rep["config"] == "set system scripts translation-scripts file bgp.slax"
+    assert (fake_device / "var/db/scripts/translation/bgp.slax").exists()
 
 
 @pytest.fixture(scope="module")

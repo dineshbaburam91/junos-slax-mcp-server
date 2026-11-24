@@ -32,7 +32,8 @@ automatically based on your request. The list is a reference for what it can do.
 
 ## Sources
 
-The server downloads and indexes these once into a local cache:
+The server downloads remote sources once into a local cache and indexes PDFs
+in `docs/` and SLAX samples in `samples/` directly:
 
 | id | kind | source |
 |----|------|--------|
@@ -40,19 +41,48 @@ The server downloads and indexes these once into a local cache:
 | `automation-reference` | pdf | This Week: Junos Automation Reference |
 | `slax-manual` | html | [libslax SLAX Language Manual](https://juniper.github.io/libslax/slax-manual.html) |
 | `libslax-wiki` | wiki | [libslax wiki](https://github.com/Juniper/libslax/wiki) |
+| `local-translation-scripts` | local-pdf | `docs/TranslationScripts.pdf` |
+| `sample-<path>` | local-slax | `.slax` files under `samples/` |
+
+Other PDF files added under `docs/` (including subfolders) are indexed
+automatically. Their document IDs use a normalized version of their relative
+file path, prefixed with `local-`.
+
+Place UTF-8 `.slax` examples in `samples/`, including its `op/`, `commit/`,
+`event/`, `snmp/`, or `translation/` subfolders. Each sample has an ID based
+on its relative path, such as `sample-commit-license-check` for
+`samples/commit/license-check.slax`. Restart the server after adding or
+changing files: the catalog is discovered at startup and loaded documents are
+cached in memory. Search results and script-generation references can cite
+matching samples; `read_pages` returns the indexed script text.
 
 ## Tools
 
 The assistant calls these for you; you rarely invoke them directly.
 
 - `generate_slax_script(scenario, script_type?, max_references?)` — **primary tool.**
-  Returns a ready-to-complete SLAX scaffold (op / commit / event / snmp) with the
-  correct boilerplate, install notes, and grounding passages from the docs. The
-  script type is inferred from the scenario if not given.
-- `search_docs(query, doc_id?, max_results?)` — ranked passage search across sources.
+  Returns a ready-to-complete SLAX scaffold (op / commit / event / snmp /
+  translation) with the correct boilerplate, install notes, and grounding
+  passages from the docs and samples. The script type is inferred from the
+  scenario if not given. It also saves the scaffold and returns its absolute
+  `scaffold_path`.
+- `save_slax_script(script, script_name?)` — saves the completed script text
+  separately and returns its absolute `path`. After adapting a scaffold, the
+  assistant should call this tool and share the path with the user.
+- `search_docs(query, doc_id?, max_results?)` — ranked passage search across
+  remote sources, local PDFs in `docs/`, and SLAX files in `samples/`.
 - `answer_context(question, max_results?)` — supporting passages + citations for a question.
 - `read_pages(doc_id, start_page, end_page?)` — raw text of specific sections.
 - `list_documents()` — list sources, section counts, and any load errors.
+
+The server creates `~/Documents/junos-slax-generated/` on the first save.
+Scaffolds and completed scripts from all server sessions are stored there with
+unique names, so saves do not overwrite earlier files. They remain until you
+delete them; this scratch directory is not automatically cleaned up or
+indexed as samples. On POSIX systems, newly created directories and files are
+restricted to the current user. Previously saved files in the system temporary
+directory are not moved. The saved scaffold is not the final assistant-adapted
+script; saving the latter requires `save_slax_script`.
 
 ### Device tools (via junos-mcp-server)
 
@@ -199,8 +229,9 @@ deploy_slax_script(
 - `run_output` is the text the SLAX script emitted (its `<output>` / results).
 - If validation fails, `deployed` is `false`, nothing is committed, and the
   failing `validation` block is returned.
-- `commit` / `event` / `snmp` scripts are installed and committed but not run
-  (commit scripts run on the next commit; event scripts run on their trigger).
+- `commit` / `event` / `snmp` / `translation` scripts are installed and
+  committed but not run (commit and translation scripts run during commit;
+  event scripts run on their trigger).
 
 
 ## Getting started

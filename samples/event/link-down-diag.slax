@@ -1,0 +1,51 @@
+version 1.1;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+match / {
+    var $interface = event-script-input/trigger-event/attribute-list/
+        attribute[name == "interface-name"]/value;
+
+    if ($interface == "ge-0/0/0") {
+        expr jcs:syslog("daemon.notice", "LINK_DIAG: collecting data for ", $interface);
+
+        var $rpc = <get-interface-information> {
+            <interface-name> $interface;
+            <extensive>;
+        }
+        var $reply = jcs:invoke($rpc);
+        var $physical = $reply/physical-interface[name == "ge-0/0/0"];
+
+        if ($physical) {
+            expr jcs:syslog("daemon.notice",
+                "LINK_DIAG: interface=", $interface,
+                " admin=", $physical/admin-status,
+                " oper=", $physical/oper-status);
+
+            if ($physical/input-error-list/input-errors) {
+                expr jcs:syslog("daemon.notice",
+                    "LINK_DIAG: input-errors=",
+                    $physical/input-error-list/input-errors);
+            } else {
+                expr jcs:syslog("daemon.warning",
+                    "LINK_DIAG: input error counter unavailable");
+            }
+
+            if ($physical/output-error-list/output-errors) {
+                expr jcs:syslog("daemon.notice",
+                    "LINK_DIAG: output-errors=",
+                    $physical/output-error-list/output-errors);
+            } else {
+                expr jcs:syslog("daemon.warning",
+                    "LINK_DIAG: output error counter unavailable");
+            }
+        } else {
+            expr jcs:syslog("daemon.warning",
+                "LINK_DIAG: interface diagnostics unavailable for ", $interface);
+        }
+    }
+}
